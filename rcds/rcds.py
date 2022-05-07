@@ -14,7 +14,15 @@ from time import sleep
 from statsmodels.api import WLS
 from scipy.optimize import minimize
 
+from botorch.models import FixedNoiseGP
+from botorch.fit import fit_gpytorch_model
+from botorch.acquisition.analytic import ExpectedImprovement
+from botorch.acquisition.analytic import UpperConfidenceBound
+from botorch.optim import optimize_acqf
+from gpytorch.mlls import ExactMarginalLogLikelihood
+
 from .statistics import median, biweight_midvariance
+from .wrapper import Wrapper
 
 class RCDS():
     """
@@ -138,8 +146,10 @@ class RCDS():
         Bracket objective minimum for given initial knobs along a given search direction.
     parabola(self, vector:torch.Tensor, table_alpha:torch.Tensor, table_knobs:torch.Tensor, table_value:torch.Tensor, table_error:torch.Tensor, *, detector:Callable[[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]=None) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]
         Find 1d minimum using (weighted) parabola fit.
-    minimize_parabola(self, sf:torch.Tensor, knobs:torch.Tensor, value:torch.Tensor, error:torch.Tensor, vector:torch.Tensor, *, detector:Callable[[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]=None, **kwargs) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+    minimize_parabola(self, sf:torch.Tensor, knobs:torch.Tensor, value:torch.Tensor, error:torch.Tensor, vector:torch.Tensor, *, sample:bool=True, detector:Callable[[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]=None, **kwargs) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]
         Parabola line minimization (bracket and 1d minimization using parabola fit).
+    minimize_gp(self, sf:torch.Tensor, knobs:torch.Tensor, value:torch.Tensor, error:torch.Tensor, vector:torch.Tensor, *, no_ei:int=8, no_ucb:int=2, nr:int=64, rs:int=256, np:int=1, beta:float=0.5, **kwargs) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+        GP line minimization (GP and 1d minimization using 3 point parabola fit).
     fit_rcds(self, knobs:torch, matrix:torch.Tensor, *, minimize:Callable[[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor], Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]=None, termination:bool=True, verbose:bool=False, **kwargs) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
         RCDS minimization.
     adjust_cube(self, *,  data:torch.Tensor=None, extend:bool=False, factor:float=5.0, center_estimator:Callable[[torch.Tensor], torch.Tensor]=median, spread_estimator:Callable[[torch.Tensor], torch.Tensor]=biweight_midvariance) -> Tuple[torch.Tensor, torch.Tensor]
@@ -697,6 +707,7 @@ class RCDS():
 
     def parabola(self, vector:torch.Tensor,
                  table_alpha:torch.Tensor, table_knobs:torch.Tensor, table_value:torch.Tensor, table_error:torch.Tensor, *,
+                 sample:bool=True,
                  detector:Callable[[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]=None) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Find 1d minimum using (weighted) parabola fit.
@@ -716,6 +727,8 @@ class RCDS():
             value table
         table_error: torch.Tensor
             error table
+        sample: bool
+            flag to add additional samples
         detector:Callable[[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]
             detector(residual, self.ft, self.otol)
             function to use for outlier cleaning, applied to fit residuals, assumed to return weights for each sample point
@@ -735,25 +748,27 @@ class RCDS():
 
         alpha_lb, *_, alpha_ub = table_alpha
 
-        alpha_size = self.fr*(alpha_ub - alpha_lb)
-        alpha_grid = torch.linspace(alpha_lb, alpha_ub, self.ns + 2, dtype=self.dtype, device=self.device)[1:-1]
-        alpha_mask = torch.stack([(table_alpha - alpha).abs().min() > alpha_size for alpha in alpha_grid])
-        alpha_grid = alpha_grid[alpha_mask]
+        if sample:
 
-        for alpha in alpha_grid:
+            alpha_size = self.fr*(alpha_ub - alpha_lb)
+            alpha_grid = torch.linspace(alpha_lb, alpha_ub, self.ns + 2, dtype=self.dtype, device=self.device)[1:-1]
+            alpha_mask = torch.stack([(table_alpha - alpha).abs().min() > alpha_size for alpha in alpha_grid])
+            alpha_grid = alpha_grid[alpha_mask]
 
-            knobs = self.to_cube(start + vector*alpha)
-            knobs = self.alter_knobs(start, knobs)
-            value, error = self.objective(knobs)
+            for alpha in alpha_grid:
 
-            self.append(knobs, value, error)
-            table_alpha = torch.cat((table_alpha, alpha.unsqueeze(0)))
-            table_knobs = torch.cat((table_knobs, knobs.unsqueeze(0)))
-            table_value = torch.cat((table_value, value.unsqueeze(0)))
-            table_error = torch.cat((table_error, error.unsqueeze(0)))
+                knobs = self.to_cube(start + vector*alpha)
+                knobs = self.alter_knobs(start, knobs)
+                value, error = self.objective(knobs)
 
-            if torch.isnan(value):
-                return knobs, value, error
+                self.append(knobs, value, error)
+                table_alpha = torch.cat((table_alpha, alpha.unsqueeze(0)))
+                table_knobs = torch.cat((table_knobs, knobs.unsqueeze(0)))
+                table_value = torch.cat((table_value, value.unsqueeze(0)))
+                table_error = torch.cat((table_error, error.unsqueeze(0)))
+
+                if torch.isnan(value):
+                    return knobs, value, error
 
         X = torch.stack([table_alpha**2, table_alpha, torch.ones_like(table_alpha)]).T.cpu().numpy()
         y = table_value.cpu().numpy()
@@ -819,6 +834,98 @@ class RCDS():
         """
         alpha, knobs, value, error = self.bracket(sf, knobs, value, error, vector)
         return self.parabola(vector, alpha, knobs, value, error, detector=detector)
+
+
+    def minimize_gp(self, sf:torch.Tensor, knobs:torch.Tensor, value:torch.Tensor, error:torch.Tensor, vector:torch.Tensor, *,
+                    no_ei:int=8, no_ucb:int=2, nr:int=64, rs:int=256, np:int=1, beta:float=0.5,
+                    **kwargs) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        GP line minimization (GP and 1d minimization using 3 point parabola fit).
+
+        Parameters
+        ----------
+        sf: torch.Tensor
+            initial step fraction (not used)
+        knobs: torch.Tensor
+            initial knobs
+        value: torch.Tensor
+            initial value
+        error: torch.Tensor
+            initial error
+        vector: torch.Tensor
+            search direction
+        no_ei: int
+            number of observations to perform with ei af
+        no_ucb: int
+            number of observations to perform with ucb af
+        beta: float
+            ucb beta factor
+        nr: int
+            number of restarts
+        rs: int
+            number of raw samples
+        kwargs:
+            passed to parabola
+
+        Returns
+        -------
+        knobs, value, error (Tuple[torch.Tensor, torch.Tensor, torch.Tensor])
+        alpha_lb, alpha_ub = self.interval(knobs, vector)
+        """
+        alpha_lb, alpha_ub = self.interval(knobs, vector)
+
+        @Wrapper(nk=1, lb=alpha_lb.flatten(), ub=alpha_ub.flatten())
+        def target(alpha:torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+            return self.objective(knobs + alpha*vector)
+
+        target()
+
+        x = torch.zeros((1, 1))
+        X = torch.stack([target.forward(alpha) for alpha in x])
+
+        y = torch.clone(value).flatten()
+        s = torch.clone(error).flatten()
+
+        Y = ((y - y.mean())/y.std()).nan_to_num()
+        S = (s/y.std()).nan_to_num()
+
+        gp = FixedNoiseGP(X, Y.reshape(-1, 1), S.reshape(-1, 1))
+        ll = ExactMarginalLogLikelihood(gp.likelihood, gp)
+        fit_gpytorch_model(ll)
+
+        bounds = torch.tensor([[0.0], [1.0]], dtype=self.dtype, device=self.device)
+
+        for i in range(no_ei + no_ucb):
+            best = torch.min(Y)
+            af = ExpectedImprovement(gp, best, maximize=False) if i < no_ei else UpperConfidenceBound(gp, beta, maximize=False)
+            candidate, _ = optimize_acqf(af, bounds = bounds, num_restarts = nr, q = 1, raw_samples = rs)
+            candidate = candidate.flatten()
+            value, error = target(candidate)
+            x = torch.cat([x, target.inverse(candidate).reshape(-1, 1)])
+            X = torch.cat([X, candidate.reshape(-1, 1)])
+            y = torch.cat([y, value.flatten()])
+            s = torch.cat([s, error.flatten()])
+            Y = ((y - y.mean())/y.std()).nan_to_num()
+            S = (s/y.std()).nan_to_num()
+            gp = FixedNoiseGP(X, Y.reshape(-1, 1), S.reshape(-1, 1))
+            ll = ExactMarginalLogLikelihood(gp.likelihood, gp)
+            fit_gpytorch_model(ll)
+
+        alpha = x.flatten()
+        knobs = torch.stack([knobs + a*vector for a in alpha])
+        value = y
+        error = s
+
+        index = alpha.argsort()
+        alpha = alpha[index] - alpha[value.argmin()]
+        knobs = knobs[index]
+        value = value[index]
+        error = error[index]
+
+        index = value.argmin()
+        index = range(index - np, index + np + 1)
+
+        return self.parabola(vector, alpha[index], knobs[index], value[index], error[index], sample=False, **kwargs)
 
 
     def fit_rcds(self, knobs:torch, matrix:torch.Tensor, *,
