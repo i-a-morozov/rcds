@@ -148,7 +148,7 @@ class RCDS():
         Find 1d minimum using (weighted) parabola fit.
     minimize_parabola(self, sf:torch.Tensor, knobs:torch.Tensor, value:torch.Tensor, error:torch.Tensor, vector:torch.Tensor, *, sample:bool=True, detector:Callable[[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]=None, **kwargs) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]
         Parabola line minimization (bracket and 1d minimization using parabola fit).
-    minimize_gp(self, sf:torch.Tensor, knobs:torch.Tensor, value:torch.Tensor, error:torch.Tensor, vector:torch.Tensor, *, no_ei:int=8, no_ucb:int=2, nr:int=64, rs:int=256, np:int=1, beta:float=0.5, **kwargs) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+    minimize_gp(self, sf:torch.Tensor, knobs:torch.Tensor, value:torch.Tensor, error:torch.Tensor, vector:torch.Tensor, *, no_ei:int=8, no_ucb:int=2, nr:int=64, rs:int=256, beta:float=0.5, use_parabola:bool=True, np:int=1, **kwargs) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]
         GP line minimization (GP and 1d minimization using 3 point parabola fit).
     fit_rcds(self, knobs:torch, matrix:torch.Tensor, *, minimize:Callable[[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor], Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]=None, termination:bool=True, verbose:bool=False, **kwargs) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
         RCDS minimization.
@@ -790,7 +790,11 @@ class RCDS():
             fit = WLS(y, X, weights=w).fit()
             a, b, c = fit.params
 
-        alpha = torch.tensor(-b/(2.0*a), dtype=self.dtype, device=self.device)
+        if abs(a) >= self.epsilon:
+            alpha = torch.tensor(-b/(2.0*a), dtype=self.dtype, device=self.device)
+        else:
+            index = table_value.argmin()
+            alpha = table_alpha[index]
 
         if alpha > alpha_ub:
             alpha = alpha_ub
@@ -837,7 +841,7 @@ class RCDS():
 
 
     def minimize_gp(self, sf:torch.Tensor, knobs:torch.Tensor, value:torch.Tensor, error:torch.Tensor, vector:torch.Tensor, *,
-                    no_ei:int=8, no_ucb:int=2, nr:int=64, rs:int=256, np:int=1, beta:float=0.5,
+                    no_ei:int=8, no_ucb:int=2, nr:int=64, rs:int=256, beta:float=1.0, use_parabola:bool=True, np:int=1,
                     **kwargs) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         GP line minimization (GP and 1d minimization using 3 point parabola fit).
@@ -858,12 +862,16 @@ class RCDS():
             number of observations to perform with ei af
         no_ucb: int
             number of observations to perform with ucb af
-        beta: float
-            ucb beta factor
         nr: int
             number of restarts
         rs: int
             number of raw samples
+        beta: float
+            ucb beta factor
+        use_parabola: bool
+            flag to perfrom parabola fit
+        np: int
+            number of points to use in parabola fit
         kwargs:
             passed to parabola
 
@@ -923,9 +931,12 @@ class RCDS():
         error = error[index]
 
         index = value.argmin()
-        index = range(index - np, index + np + 1)
 
-        return self.parabola(vector, alpha[index], knobs[index], value[index], error[index], sample=False, **kwargs)
+        if use_parabola:
+            index = range(index - np, index + np + 1)
+            return self.parabola(vector, alpha[index], knobs[index], value[index], error[index], sample=False, **kwargs)
+
+        return knobs[index], value[index], error[index]
 
 
     def fit_rcds(self, knobs:torch, matrix:torch.Tensor, *,
