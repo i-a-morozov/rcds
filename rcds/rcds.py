@@ -6,6 +6,7 @@ RCDS minimization module.
 import torch
 import numpy
 import logging
+import warnings
 
 from typing import Tuple
 from typing import Callable
@@ -873,13 +874,15 @@ class RCDS():
         np: int
             number of points to use in parabola fit
         kwargs:
-            passed to parabola
+            passed to FixedNoiseGP
 
         Returns
         -------
         knobs, value, error (Tuple[torch.Tensor, torch.Tensor, torch.Tensor])
         alpha_lb, alpha_ub = self.interval(knobs, vector)
         """
+        warnings.filterwarnings('ignore', category=RuntimeWarning)
+
         alpha_lb, alpha_ub = self.interval(knobs, vector)
 
         @Wrapper(nk=1, lb=alpha_lb.flatten(), ub=alpha_ub.flatten())
@@ -887,6 +890,12 @@ class RCDS():
             return self.objective(knobs + alpha*vector)
 
         target()
+
+        if isinstance(beta, float):
+            beta = beta*torch.ones(no_ucb, dtype=self.dtype, device=self.device)
+
+        if len(beta) != no_ucb:
+            raise ValueError('beta length mismatch')
 
         x = torch.zeros((1, 1))
         X = torch.stack([target.forward(alpha) for alpha in x])
@@ -897,7 +906,7 @@ class RCDS():
         Y = ((y - y.mean())/y.std()).nan_to_num()
         S = (s/y.std()).nan_to_num()
 
-        gp = FixedNoiseGP(X, Y.reshape(-1, 1), S.reshape(-1, 1))
+        gp = FixedNoiseGP(X, Y.reshape(-1, 1), S.reshape(-1, 1)**2, **kwargs)
         ll = ExactMarginalLogLikelihood(gp.likelihood, gp)
         fit_gpytorch_model(ll)
 
@@ -905,7 +914,7 @@ class RCDS():
 
         for i in range(no_ei + no_ucb):
             best = torch.min(Y)
-            af = ExpectedImprovement(gp, best, maximize=False) if i < no_ei else UpperConfidenceBound(gp, beta, maximize=False)
+            af = ExpectedImprovement(gp, best, maximize=False) if i < no_ei else UpperConfidenceBound(gp, beta[i - no_ei], maximize=False)
             candidate, _ = optimize_acqf(af, bounds = bounds, num_restarts = nr, q = 1, raw_samples = rs)
             candidate = candidate.flatten()
             value, error = target(candidate)
@@ -913,9 +922,10 @@ class RCDS():
             X = torch.cat([X, candidate.reshape(-1, 1)])
             y = torch.cat([y, value.flatten()])
             s = torch.cat([s, error.flatten()])
+            self.append(knobs + x[-1]*vector, y[-1], s[-1])
             Y = ((y - y.mean())/y.std()).nan_to_num()
             S = (s/y.std()).nan_to_num()
-            gp = FixedNoiseGP(X, Y.reshape(-1, 1), S.reshape(-1, 1))
+            gp = FixedNoiseGP(X, Y.reshape(-1, 1), S.reshape(-1, 1)**2, **kwargs)
             ll = ExactMarginalLogLikelihood(gp.likelihood, gp)
             fit_gpytorch_model(ll)
 
@@ -934,7 +944,7 @@ class RCDS():
 
         if use_parabola:
             index = range(index - np, index + np + 1)
-            return self.parabola(vector, alpha[index], knobs[index], value[index], error[index], sample=False, **kwargs)
+            return self.parabola(vector, alpha[index], knobs[index], value[index], error[index], sample=False)
 
         return knobs[index], value[index], error[index]
 
