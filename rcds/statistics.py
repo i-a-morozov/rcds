@@ -379,8 +379,8 @@ def biweight_midvariance(data:Tensor,
 
     deviation = median_deviation(data, center=center, **kwargs) if deviation is None else deviation
 
-    weight = 1.0 - ((data - center)/(scale*deviation))**2
-    weight[weight < 0.0] = 0.0
+    weight = (1.0 - ((data - center)/(scale*deviation))**2)
+    weight *= weight > 0.0
 
     return (len(data)*(weight**4*(data - center)**2).sum()/(weight*(5.0*weight - 4.0)).sum()**2)
 

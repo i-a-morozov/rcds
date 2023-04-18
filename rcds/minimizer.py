@@ -497,6 +497,8 @@ class Minimizer():
         lb, ub (tuple[Tensor, Tensor])
 
         """
+        warnings.filterwarnings('ignore', category=UserWarning)
+
         if data is None:
             data, *_ = self.history()
             data = self.inverse(data)
@@ -508,9 +510,12 @@ class Minimizer():
                 raise TypeError(f'MINIMIZER: failed to convert knobs data to torch')
 
         data = data.T
+        
+        center = torch.func.vmap(center)(data) 
+        spread = torch.func.vmap(spread)(data).sqrt()
 
-        lb = center(data) - factor*(self.epsilon + spread(data).sqrt())
-        ub = center(data) + factor*(self.epsilon + spread(data).sqrt())
+        lb = center - factor*(self.epsilon + spread)
+        ub = center + factor*(self.epsilon + spread)
 
         if not extend:
             lb[lb < self.lb] = self.lb[lb < self.lb]
