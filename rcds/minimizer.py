@@ -17,6 +17,11 @@ import warnings
 from torch import Tensor
 from typing import TypeAlias, Optional, Callable, Union
 
+from pydantic import validate_arguments
+
+class Config:
+    arbitrary_types_allowed = True
+
 Knobs: TypeAlias = Tensor
 Value: TypeAlias = Tensor
 Error: TypeAlias = Tensor
@@ -154,6 +159,7 @@ class Minimizer():
         Estimate standard errors.
 
     """
+    @validate_arguments(config=Config)
     def __init__(self,
                  /,
                  objective:Objective,
@@ -467,6 +473,7 @@ class Minimizer():
         return any((knobs - 0.0).abs() < self.epsilon) or any((knobs - 1.0).abs() < self.epsilon)
 
 
+    @validate_arguments(config=Config)
     def adjust_cube(self,
                     *,
                     data:Optional[Tensor]=None,
@@ -524,6 +531,7 @@ class Minimizer():
         return lb, ub
 
 
+    @validate_arguments(config=Config)
     def matrix(self,
                *args,
                knobs:Optional[Knobs]=None) -> Tensor:
@@ -556,6 +564,7 @@ class Minimizer():
         return torch.linalg.eig(hessian).eigenvectors.real
 
 
+    @validate_arguments(config=Config)
     def bracket(self,
                 sf:Union[Tensor, float],
                 knobs:Knobs,
@@ -759,6 +768,7 @@ class Minimizer():
         return table_alpha[index], table_knobs[index], table_value[index], table_error[index]
 
 
+    @validate_arguments(config=Config)
     def parabola(self,
                  vector:Tensor,
                  table_alpha:Tensor,
@@ -883,6 +893,7 @@ class Minimizer():
         return knobs, value, error
 
 
+    @validate_arguments(config=Config)
     def minimize_parabola(self,
                           sf:Union[Tensor, float],
                           knobs:Knobs,
@@ -948,6 +959,7 @@ class Minimizer():
         return self.parabola(vector, alpha, knobs, value, error, *args, np=np, ns=ns, fr=fr, ft=ft, tolerance=tolerance, sample=sample, detector=detector)
 
 
+    @validate_arguments(config=Config)
     def minimize_gp(self,
                     sf:Union[Tensor, float],
                     knobs:Knobs,
@@ -1064,6 +1076,7 @@ class Minimizer():
         return knobs[index], value[index], error[index]
 
 
+    @validate_arguments(config=Config)
     def rcds(self,
              knobs:Knobs,
              matrix:Tensor,
