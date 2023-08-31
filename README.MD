@@ -1,5 +1,4 @@
 # RCDS, 2021-2023
-## i.a.morozov@inp.nsk.su
 
 Robust Conjugate Direction Search (modified Powell's method, optimization of scalar noisy objective)
 
